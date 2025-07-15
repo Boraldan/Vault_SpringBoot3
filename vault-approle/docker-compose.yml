@@ -1,0 +1,163 @@
+services:
+
+  app-approle:
+#    image: vault_app:latest
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    container_name: app-approle
+    env_file:
+      - .env
+    networks:
+      - vault_approle_net
+    ports:
+      - "8080:8080"
+    depends_on:
+      - vault_prod_approle
+
+
+  vault_prod_approle:
+    image: hashicorp/vault:1.19.4
+    container_name: vault_prod_approle
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_ADDR: http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data-approle:/vault/file
+      - ./vault/config:/vault/config
+      - ./vault/policies:/vault/policies
+    command: vault server -config=/vault/config/vault.hcl
+    networks:
+      - vault_approle_net
+
+
+  postgres_task_vault_approle:
+    image: postgres:latest
+    container_name: postgres_task_vault_approle
+    environment:
+      POSTGRES_DB: postgres_task_vault_approle
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123
+    volumes:
+      - type: volume
+        source: postgres_task_vault_approle
+        target: /var/lib/postgresql/data
+    ports:
+      - "15432:5432"
+    networks:
+      - vault_approle_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  vault_approle_net:
+
+volumes:
+  postgres_task_vault_approle:
+  vault-data-approle:
+
+# Вот пошаговая инструкция по инициализации HashiCorp Vault, если ты его только что поднял в Docker
+# и хочешь использовать AppRole аутентификацию для Spring Boot приложения:
+#
+#  0. Подключись к Vault-контейнеру
+#  docker exec -it vault_prod sh
+#  Либо используй vault CLI из хост-машины, если у тебя установлен клиент и VAULT_ADDR=http://localhost:8200.
+#
+#  1. Инициализируй Vault
+#  vault operator init -key-shares=1 -key-threshold=1
+#
+# Ты получишь unseal key и initial root token, например:
+# Unseal Key 1: xxxxxxxx
+# Initial Root Token: hvs.xxxxxxxx
+#  Обязательно сохрани эти данные.
+#
+#  2. Распечатай (unseal) Vault
+#
+#  vault operator unseal
+#  # Введи Unseal Key из предыдущего шага
+#
+#  3. Авторизуйся под root-пользователем
+#
+#  vault login
+#  # Введи Root Token (hvs.xxxxxx)
+#
+#  4. Включи AppRole аутентификацию
+#  vault auth enable approle
+#
+# 5. Создай policy (например, task-policy.hcl):
+# через :
+#  volumes:
+#    - ./vault/policies:/vault/policies
+#
+# Создай файл task-policy.hcl со следующим содержимым:
+#  path "secret/data/postgres/*" {
+#  capabilities = ["read"]
+# }
+#
+# или загрузи его:
+# Скопируй файл в контейнер:
+#  docker cp task-policy.hcl vault_prod:/vault/policies/task-policy.hcl
+#
+#
+# применить его в контейнере:
+#  vault policy write task-policy /vault/policies/task-policy.hcl
+#
+#  6. Создай AppRole
+#
+#  vault write auth/approle/role/task-role token_policies="task-policy" token_ttl=1h token_max_ttl=4h
+#  где task-role - это как я хочу назвать нашу роль
+#
+#  7. Получи role_id и secret_id
+#  vault read auth/approle/role/task-role/role-id
+#  vault write -f auth/approle/role/task-role/secret-id
+#
+#  Сохрани role_id и secret_id. Они понадобятся приложению.
+#
+#  8. Проверь KV backend (если не включен)
+#
+# Если ты используешь путь secret/, проверь, что включен kv:
+#
+#  vault secrets enable -path=secret kv-v2
+#
+# Создай секрет:
+#  vault kv put secret/postgres POSTGRES_USER=postgres POSTGRES_PASSWORD=123
+#
+#9. Пример application.yml для Spring Boot:
+#
+#spring:
+#  cloud:
+#    vault:
+#      authentication: APPROLE
+#      scheme: http
+#      host: vault_prod
+#      port: 8200
+#      app-role:
+#        role-id: ${VAULT_ROLE_ID}
+#        secret-id: ${VAULT_SECRET_ID}
+#      kv:
+#        enabled: true
+#        backend: secret
+#        default-context: postgres
+#
+#
+#А .env:
+#  VAULT_ROLE_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#  VAULT_SECRET_ID=yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+#
+#  Готово!
+#  Приложение сможет подключиться к Vault, пройти AppRole-аутентификацию и получить секреты.
+#
+#  Как посмотреть структуру KV вручную
+#  vault kv list secret/
+#  vault kv get secret/postgres/secret
+#  vault policy read task-policy
+#
+# Дополнительно: ручной curl для проверки входа
+#  curl --request POST --data '{"role_id":"<ROLE_ID>","secret_id":"<SECRET_ID>"}' http://localhost:8200/v1/auth/approle/login
